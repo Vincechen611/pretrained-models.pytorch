@@ -26,14 +26,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
+import torchvision.transforms as transforms
+from torch.autograd import Variable
 from torch.nn import init
+from PIL import Image
 
 __all__ = ['xception']
 
 pretrained_settings = {
     'xception': {
         'imagenet': {
-            'url': 'http://data.lip6.fr/cadene/pretrainedmodels/xception-b5690688.pth',
+            'url': 'https://www.dropbox.com/s/y2fa6x4rrwdcnun/xception-fixed.pth?dl=1',
             'input_space': 'RGB',
             'input_size': [3, 299, 299],
             'input_range': [0, 1],
@@ -79,7 +82,7 @@ class Block(nn.Module):
             rep.append(nn.BatchNorm2d(out_filters))
             filters = out_filters
 
-        for i in range(reps-1):
+        for _ in range(reps-1):
             rep.append(self.relu)
             rep.append(SeparableConv2d(filters,filters,3,stride=1,padding=1,bias=False))
             rep.append(nn.BatchNorm2d(filters))
@@ -195,14 +198,13 @@ class Xception(nn.Module):
         
         x = self.conv4(x)
         x = self.bn4(x)
+        x = self.relu(x)
+        x = F.adaptive_avg_pool2d(x, (1, 1))
+        x = x.view(x.size(0), -1)
         return x
 
     def logits(self, features):
-        x = self.relu(features)
-
-        x = F.adaptive_avg_pool2d(x, (1, 1))
-        x = x.view(x.size(0), -1)
-        x = self.last_linear(x)
+        x = self.last_linear(features)
         return x
 
     def forward(self, input):
@@ -211,7 +213,7 @@ class Xception(nn.Module):
         return x
 
 
-def xception(num_classes=1000, pretrained='imagenet'):
+def xception(num_classes=1000, pretrained='imagenet', model_path=''):
     model = Xception(num_classes=num_classes)
     if pretrained:
         settings = pretrained_settings['xception'][pretrained]
@@ -219,7 +221,10 @@ def xception(num_classes=1000, pretrained='imagenet'):
             "num_classes should be {}, but is {}".format(settings['num_classes'], num_classes)
 
         model = Xception(num_classes=num_classes)
-        model.load_state_dict(model_zoo.load_url(settings['url']))
+        if model_path == '':
+            model.load_state_dict(model_zoo.load_url(settings['url']))
+        else:
+            model.load_state_dict(torch.load(model_path))
 
         model.input_space = settings['input_space']
         model.input_size = settings['input_size']
@@ -231,3 +236,27 @@ def xception(num_classes=1000, pretrained='imagenet'):
     model.last_linear = model.fc
     del model.fc
     return model
+
+    @staticmethod
+    def imgs2tensor_without_scale(img_path_list,input_space='RGB'):
+        data = torch.zeros([0, 3, 299, 299])
+        transform_img = transforms.Compose([
+            transforms.Resize((299, 299)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5],std=[0.5, 0.5, 0.5])
+            ]
+        )
+        for img_path in img_path_list:
+            with open(img_path, 'rb') as f:
+                with Image.open(f) as img:
+                    img = img.convert(input_space)
+                    data = torch.cat((data, transform_img(img).unsqueeze(0)), 0)
+        return Variable(data, requires_grad=False)
+    
+    @staticmethod
+    def transform_model(org_model_path, new_model_path):
+        state_dict = torch.load(org_model_path)
+        for name, weights in state_dict.items():
+            if 'pointwise' in name:
+                state_dict[name] = weights.unsqueeze(-1).unsqueeze(-1)
+        torch.save(state_dict, new_model_path)
